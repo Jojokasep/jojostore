@@ -5,7 +5,8 @@ const cors = require('cors');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
+// PAKSA IZINKAN SEMUA ORANG (CORS) DAN TERIMA DATA JSON
+app.use(cors({ origin: '*', methods: ['GET', 'POST'], allowedHeaders: ['Content-Type'] }));
 app.use(express.json());
 
 const CONFIG = {
