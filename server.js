@@ -5,7 +5,7 @@ const cors = require('cors');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// CORS diizinkan untuk semua domain
+// Hanya 1 kali pengaturan CORS
 app.use(cors({ origin: '*', methods: ['GET', 'POST'], allowedHeaders: ['Content-Type'] }));
 app.use(express.json());
 
@@ -44,16 +44,11 @@ async function hitOrderkuotaAPI(url, data) {
 
 function cleanNumber(str) { if (!str) return 0; return Number(String(str).replace(/[^0-9]/g, '')) || 0; }
 
-// FUNGSI BARU: Pembersih status agar fleksibel membaca berbagai format huruf
 function normalizeStatus(rawStatus) {
     if (!rawStatus) return "Pending";
     const s = String(rawStatus).toLowerCase().trim();
-    if (s.includes('sukses') || s.includes('success') || s.includes('berhasil') || s === 'done' || s === 'settlement') {
-        return "Sukses";
-    }
-    if (s.includes('gagal') || s.includes('fail') || s.includes('cancel') || s.includes('expired') || s === 'error') {
-        return "Gagal";
-    }
+    if (s.includes('sukses') || s.includes('success') || s.includes('berhasil') || s === 'done' || s === 'settlement') return "Sukses";
+    if (s.includes('gagal') || s.includes('fail') || s.includes('cancel') || s.includes('expired') || s === 'error') return "Gagal";
     return "Pending";
 }
 
@@ -83,7 +78,7 @@ app.get('/api/qris', async (req, res) => {
     }
 });
 
-// 3. MUTASI (SUDAH DIPERBAIKI)
+// 3. MUTASI
 app.get('/api/mutasi', async (req, res) => {
     const result = await hitOrderkuotaAPI('https://app.orderkuota.com/api/v2/qris/mutasi/1349636', {
         'requests[0]': 'account', 'requests[qris_history][page]': '1',
@@ -91,12 +86,7 @@ app.get('/api/mutasi', async (req, res) => {
     });
     const transactions = result.qris_history?.results;
     if (result.success && transactions && transactions.length > 0) {
-        const cleanList = transactions.map(t => ({
-            ...t, 
-            kredit_clean: cleanNumber(t.kredit), 
-            // Menggunakan fungsi normalizeStatus agar tidak salah baca
-            status: normalizeStatus(t.status) 
-        }));
+        const cleanList = transactions.map(t => ({ ...t, kredit_clean: cleanNumber(t.kredit), status: normalizeStatus(t.status) }));
         res.json({ success: true, data: cleanList });
     } else {
         res.json({ success: false, data: [] });
