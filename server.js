@@ -5,7 +5,6 @@ const cors = require('cors');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Hanya 1 kali pengaturan CORS
 app.use(cors({ origin: '*', methods: ['GET', 'POST'], allowedHeaders: ['Content-Type'] }));
 app.use(express.json());
 
@@ -44,14 +43,6 @@ async function hitOrderkuotaAPI(url, data) {
 
 function cleanNumber(str) { if (!str) return 0; return Number(String(str).replace(/[^0-9]/g, '')) || 0; }
 
-function normalizeStatus(rawStatus) {
-    if (!rawStatus) return "Pending";
-    const s = String(rawStatus).toLowerCase().trim();
-    if (s.includes('sukses') || s.includes('success') || s.includes('berhasil') || s === 'done' || s === 'settlement') return "Sukses";
-    if (s.includes('gagal') || s.includes('fail') || s.includes('cancel') || s.includes('expired') || s === 'error') return "Gagal";
-    return "Pending";
-}
-
 // 1. CEK SALDO
 app.get('/api/saldo', async (req, res) => {
     const result = await hitOrderkuotaAPI('https://app.orderkuota.com/api/v2/get', { 'requests[0]': 'account' });
@@ -86,7 +77,7 @@ app.get('/api/mutasi', async (req, res) => {
     });
     const transactions = result.qris_history?.results;
     if (result.success && transactions && transactions.length > 0) {
-        const cleanList = transactions.map(t => ({ ...t, kredit_clean: cleanNumber(t.kredit), status: normalizeStatus(t.status) }));
+        const cleanList = transactions.map(t => ({ ...t, kredit_clean: cleanNumber(t.kredit), status: t.status }));
         res.json({ success: true, data: cleanList });
     } else {
         res.json({ success: false, data: [] });
@@ -126,6 +117,31 @@ app.post('/api/withdraw', async (req, res) => {
         }
     } catch (error) {
         res.json({ success: false, message: "Terjadi kesalahan server" });
+    }
+});
+
+// 6. CEK PLN
+app.post('/api/pln', async (req, res) => {
+    const { id_plgn } = req.body;
+    if (!id_plgn) return res.json({ success: false, message: "ID Pelanggan wajib" });
+    try {
+        const result = await hitOrderkuotaAPI('https://app.orderkuota.com/api/v2/order', {
+            quantity: "1", id_plgn: id_plgn, kode_promo: "", pin: "",
+            phone: "0", voucher_id: "CPLN", payment: "balance"
+        });
+        
+        if (result.success) {
+            const results = result.results || result.data || {};
+            return res.json({ 
+                success: true, 
+                name: results.name || results.nama || "", 
+                segment_power: results.segment_power || results.daya || "-"
+            });
+        } else {
+            return res.json({ success: false, message: result.message || "ID Pelanggan tidak ditemukan" });
+        }
+    } catch (error) {
+        return res.json({ success: false, message: "Gagal mengecek ID Pelanggan" });
     }
 });
 
