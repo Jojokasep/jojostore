@@ -120,72 +120,29 @@ app.post('/api/withdraw', async (req, res) => {
     }
 });
 
-// 6. CEK PLN (TRIK: PAKAI VOUCHER PLN 20.000 UNTUK MENDAPATKAN DETAIL TAGIHAN)
+// 6. CEK PLN (DIKEMBALIKAN KE CPLN, DITANGKAP ERRORNYA SECARA KETAT)
 app.post('/api/pln', async (req, res) => {
     const { id_plgn } = req.body;
     if (!id_plgn) return res.json({ success: false, message: "ID Pelanggan wajib" });
+    
     try {
-        // Kode voucher PLN 20.000 (biasanya tidak mengurangi saldo jika statusnya hanya inquiry/cek)
         const result = await hitOrderkuotaAPI('https://app.orderkuota.com/api/v2/order', {
-            quantity: "1", 
-            id_plgn: id_plgn, 
-            kode_promo: "", 
-            pin: "",
-            phone: "0", 
-            voucher_id: "PLN20", // Ditemukan di daftar produk orderkuota
-            payment: "balance"
+            quantity: "1", id_plgn: id_plgn, kode_promo: "", pin: "",
+            phone: "0", voucher_id: "CPLN", payment: "balance"
         });
         
         if (result.success) {
             const results = result.results || result.data || {};
-            
-            // Cek apakah ada pesan khusus (misal saldo tidak cukup, tapi data pelanggannya muncul)
-            const msg = result.message || "";
-            let namaPelanggan = results.name || results.nama || results.desc || "-";
-            let dayaListrik = results.segment_power || results.daya || "-";
-            let biayaTagihan = results.price || results.harga || results.nominal || "0";
-
-            // Jika nama masih kosong, coba ambil dari deskripsi pesan API
-            if (namaPelanggan === "-" && msg.length > 0) {
-                const matchNama = msg.match(/Nama:\s*([A-Za-z\s]+)|Pelanggan:\s*([A-Za-z\s]+)/i);
-                if (matchNama) namaPelanggan = matchNama[1] || matchNama[2] || "-";
-                
-                const matchDaya = msg.match(/Daya:\s*(\d+[A-Z]*)/i);
-                if (matchDaya) dayaListrik = matchDaya[1] || "-";
-            }
-
             return res.json({ 
                 success: true, 
-                name: namaPelanggan, 
-                segment_power: dayaListrik,
-                price: cleanNumber(biayaTagihan),
-                raw_message: msg
+                name: results.name || results.nama || "Tidak tersedia di API", 
+                segment_power: results.segment_power || results.daya || "-"
             });
         } else {
-            // Jika gagal (misal saldo tidak cukup), cek apakah ada info pelanggannya di pesan error
-            const msg = result.message || "";
-            let namaPelanggan = "-";
-            let dayaListrik = "-";
-
-            const matchNama = msg.match(/Nama:\s*([A-Za-z\s]+)|Pelanggan:\s*([A-Za-z\s]+)/i);
-            if (matchNama) namaPelanggan = matchNama[1] || matchNama[2] || "-";
-            
-            const matchDaya = msg.match(/Daya:\s*(\d+[A-Z]*)/i);
-            if (matchDaya) dayaListrik = matchDaya[1] || "-";
-
-            if (namaPelanggan !== "-") {
-                return res.json({ 
-                    success: true, 
-                    name: namaPelanggan, 
-                    segment_power: dayaListrik,
-                    price: 0,
-                    raw_message: msg
-                });
-            }
-
-            return res.json({ success: false, message: msg || "ID Pelanggan tidak ditemukan" });
+            return res.json({ success: false, message: result.message || "ID Pelanggan tidak ditemukan" });
         }
-    } catch (error) {
+    } catch (err) {
+        // Menangkap error agar tidak menghancurkan seluruh server
         return res.json({ success: false, message: "Gagal mengecek ID Pelanggan" });
     }
 });
