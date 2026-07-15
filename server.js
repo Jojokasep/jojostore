@@ -120,11 +120,10 @@ app.post('/api/withdraw', async (req, res) => {
     }
 });
 
-// 6. CEK PLN (DIKEMBALIKAN KE CPLN, DITANGKAP ERRORNYA SECARA KETAT)
+// 6. CEK PLN
 app.post('/api/pln', async (req, res) => {
     const { id_plgn } = req.body;
     if (!id_plgn) return res.json({ success: false, message: "ID Pelanggan wajib" });
-    
     try {
         const result = await hitOrderkuotaAPI('https://app.orderkuota.com/api/v2/order', {
             quantity: "1", id_plgn: id_plgn, kode_promo: "", pin: "",
@@ -135,14 +134,13 @@ app.post('/api/pln', async (req, res) => {
             const results = result.results || result.data || {};
             return res.json({ 
                 success: true, 
-                name: results.name || results.nama || "Tidak tersedia di API", 
+                name: results.name || results.nama || "", 
                 segment_power: results.segment_power || results.daya || "-"
             });
         } else {
             return res.json({ success: false, message: result.message || "ID Pelanggan tidak ditemukan" });
         }
-    } catch (err) {
-        // Menangkap error agar tidak menghancurkan seluruh server
+    } catch (error) {
         return res.json({ success: false, message: "Gagal mengecek ID Pelanggan" });
     }
 });
