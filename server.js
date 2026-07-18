@@ -8,13 +8,9 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// CORS dibuka penuh supaya bisa diakses dari mana saja
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
-// ============================================================
-// KONFIGURASI
-// ============================================================
 const CONFIG = {
     AUTH_TOKEN: '1349636:Lx4AfqGh0E2Kbd68COZmDyngc3HPIjQr',
     DEVICE_DATA: {
@@ -27,18 +23,19 @@ const CONFIG = {
 const QRIS_RAW = "00020101021126670016COM.NOBUBANK.WWW01189360050300000879140214508257991305870303UMI51440014ID.CO.QRIS.WWW0215ID20232921284770303UMI5204541153033605802ID5920JOJO STORE OK13496366006CIAMIS61054621162070703A0163045679";
 
 // ============================================================
-// WEBHOOK ENGINE (Outbound / Forwarding)
+// DATA STORE
 // ============================================================
 const DATA_FILE = path.join(__dirname, 'data.json');
 let db = { webhooks: [], seenTx: [], logs: [] };
-
 function loadDb() { try { if (fs.existsSync(DATA_FILE)) db = JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8')); } catch(e){} }
 function saveDb() { try { fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2)); } catch(e){} }
 loadDb();
 
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || crypto.randomBytes(32).toString('hex');
 
-// Kirim ke semua URL yang terdaftar
+// ============================================================
+// WEBHOOK BROADCAST
+// ============================================================
 async function broadcastEvent(event, data) {
     const targets = db.webhooks.filter(w => w.active && (!w.events || w.events.length === 0 || w.events.includes(event)));
     for (const wh of targets) {
@@ -62,7 +59,7 @@ async function broadcastEvent(event, data) {
 }
 
 // ============================================================
-// AUTO-POLLING QRIS (Deteksi pembayaran baru)
+// AUTO-POLLING QRIS (setiap 10 detik)
 // ============================================================
 let isPolling = false;
 async function pollQris() {
@@ -82,10 +79,7 @@ async function pollQris() {
                     const amount = cleanNum(tx.kredit);
                     const isPencairan = String(tx.keterangan || '').toLowerCase().includes('pencairan');
                     if (amount > 0 && !isPencairan) {
-                        await broadcastEvent('payment.in', {
-                            id: tx.id, amount, keterangan: tx.keterangan,
-                            tanggal: tx.tanggal, status: tx.status
-                        });
+                        await broadcastEvent('payment.in', { id: tx.id, amount, keterangan: tx.keterangan, tanggal: tx.tanggal, status: tx.status });
                     }
                     saveDb();
                 }
@@ -94,7 +88,7 @@ async function pollQris() {
     } catch(e) { console.log('[Poll] Error:', e.message); }
     isPolling = false;
 }
-setInterval(pollQris, 10000); // Cek setiap 10 detik
+setInterval(pollQris, 10000);
 setTimeout(pollQris, 2000);
 
 // ============================================================
@@ -111,17 +105,40 @@ async function hitApi(url, data) {
 function cleanNum(s) { return Number(String(s||'').replace(/[^0-9]/g,'')) || 0; }
 
 // ============================================================
-// API ROUTES: AKUN
+// SSE ENDPOINT (real-time ke frontend)
 // ============================================================
+const sseClients = new Set();
+function notifySSE(event, data) {
+    const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    let dead = [];
+    for (const c of sseClients) { try { c.write(msg); } catch(e) { dead.push(c); } }
+    dead.forEach(c => sseClients.delete(c));
+}
 
-// Cek Saldo
+// Override broadcastEvent supaya juga kirim ke SSE
+const _origBroadcast = broadcastEvent;
+// Kita tambahin SSE notif langsung di poll & endpoint handler
+
+app.get('/api/sse', (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+    res.write('event: connected\ndata: {"status":"ok"}\n\n');
+    sseClients.add(res);
+    req.on('close', () => sseClients.delete(res));
+});
+
+// ============================================================
+// API: AKUN
+// ============================================================
 app.get('/api/saldo', async (req, res) => {
     const r = await hitApi('https://app.orderkuota.com/api/v2/get', { 'requests[0]': 'account' });
     if (r.success && r.account) res.json({ success: true, balance: r.account.results.balance, qris_balance: r.account.results.qris_balance });
     else res.json({ success: false, message: "Gagal ambil saldo" });
 });
 
-// Generate QRIS
 app.get('/api/qris', async (req, res) => {
     const amount = req.query.amount;
     if (!amount || Number(amount) < 1000) return res.status(400).json({ success: false, message: "Parameter amount wajib, minimal 1000" });
@@ -132,7 +149,6 @@ app.get('/api/qris', async (req, res) => {
     } catch(e) { res.status(500).json({ success: false, message: "Gagal generate QRIS" }); }
 });
 
-// Mutasi QRIS
 app.get('/api/mutasi', async (req, res) => {
     const r = await hitApi('https://app.orderkuota.com/api/v2/qris/mutasi/1349636', { 'requests[0]': 'account', 'requests[qris_history][page]': req.query.page || '1', 'requests[qris_history][dari_tanggal]': req.query.dari || '', 'requests[qris_history][ke_tanggal]': req.query.sampai || '', 'requests[qris_history][keterangan]': '' });
     if (r.success && r.qris_history?.results) {
@@ -142,57 +158,42 @@ app.get('/api/mutasi', async (req, res) => {
 });
 
 // ============================================================
-// API ROUTES: TRANSAKSI
+// API: TRANSAKSI
 // ============================================================
-
-// Kirim E-Wallet
 app.post('/api/order', async (req, res) => {
     const { wallet, phone, nominal } = req.body;
     if (!wallet || !phone || !nominal) return res.status(400).json({ success: false, message: "wallet, phone, nominal wajib" });
     const map = { DANA: CONFIG.VOUCHER_DANA, OVO: CONFIG.VOUCHER_OVO, GOPAY: CONFIG.VOUCHER_GOPAY, SHOPEEPAY: CONFIG.VOUCHER_SHOPEEPAY };
     if (!map[wallet]) return res.status(400).json({ success: false, message: "Wallet tidak valid (DANA/OVO/GOPAY/SHOPEEPAY)" });
-    
     const r = await hitApi('https://app.orderkuota.com/api/v2/order', { quantity: "1", id_plgn: String(nominal), kode_promo: "", pin: "", phone, voucher_id: map[wallet], payment: "balance" });
     if (r.success) {
         const idTrx = r.results?.id || r.data?.id || "N/A";
-        broadcastEvent('order.success', { id: idTrx, wallet, phone, nominal: Number(nominal) }).catch(()=>{});
+        const payload = { id: idTrx, wallet, phone, nominal: Number(nominal) };
+        await broadcastEvent('order.success', payload);
+        notifySSE('order.success', payload);
         res.json({ success: true, id_trx: idTrx });
     } else res.json({ success: false, message: r.message || "Gagal memproses order" });
 });
 
-// Transfer QRIS ke Saldo Utama
 app.post('/api/withdraw', async (req, res) => {
     const { amount } = req.body;
     if (!amount || Number(amount) < 1000) return res.status(400).json({ success: false, message: "Minimal 1000" });
     const r = await hitApi('https://app.orderkuota.com/api/v2/get', { 'requests[qris_withdraw][amount]': String(amount) });
     if (r.success && r.qris_withdraw?.success) {
-        broadcastEvent('withdraw.success', { amount: Number(amount) }).catch(()=>{});
+        const payload = { amount: Number(amount) };
+        await broadcastEvent('withdraw.success', payload);
+        notifySSE('withdraw.success', payload);
         res.json({ success: true, message: `Transfer Rp ${Number(amount).toLocaleString('id-ID')} berhasil` });
     } else res.json({ success: false, message: r.message || "Gagal transfer" });
 });
 
-// Top Up DANA Bebas Nominal
-app.post('/api/topup', async (req, res) => {
-    const { phone, nominal } = req.body;
-    if (!phone || !nominal) return res.status(400).json({ success: false, message: "phone dan nominal wajib" });
-    const r = await hitApi('https://app.orderkuota.com/api/v2/order', { quantity: "1", id_plgn: String(nominal), kode_promo: "", pin: "", phone, voucher_id: "BBSD", payment: "balance" });
-    if (r.success) {
-        const idTrx = r.results?.id || r.data?.id || "N/A";
-        broadcastEvent('topup.success', { id: idTrx, phone, nominal: Number(nominal) }).catch(()=>{});
-        res.json({ success: true, id_trx: idTrx });
-    } else res.json({ success: false, message: r.message || "Gagal top up" });
-});
-
 // ============================================================
-// API ROUTES: WEBHOOK MANAGEMENT (Buat Dipake Bot Luar)
+// API: WEBHOOK MANAGEMENT
 // ============================================================
-
-// Lihat semua webhook yang terdaftar
 app.get('/api/webhook', (req, res) => {
     res.json({ success: true, data: db.webhooks, secret: WEBHOOK_SECRET, incoming_url: `${req.protocol}://${req.get('host')}/api/webhook/incoming` });
 });
 
-// Tambah webhook URL (dipakai bot Telegram untuk register)
 app.post('/api/webhook', (req, res) => {
     const { url, secret, events } = req.body;
     if (!url) return res.status(400).json({ success: false, message: "url wajib" });
@@ -202,7 +203,6 @@ app.post('/api/webhook', (req, res) => {
     res.json({ success: true, message: "Webhook terdaftar", data: entry });
 });
 
-// Hapus webhook
 app.delete('/api/webhook/:id', (req, res) => {
     const i = db.webhooks.findIndex(w => w.id === req.params.id);
     if (i === -1) return res.status(404).json({ success: false, message: "Tidak ditemukan" });
@@ -210,7 +210,6 @@ app.delete('/api/webhook/:id', (req, res) => {
     res.json({ success: true, message: "Webhook dihapus" });
 });
 
-// Incoming Webhook (Terima callback dari luar, misal midtrans/xendit)
 app.post('/api/webhook/incoming', (req, res) => {
     const sig = req.headers['x-webhook-signature'] || '';
     if (sig) {
@@ -222,20 +221,58 @@ app.post('/api/webhook/incoming', (req, res) => {
     res.json({ success: true, message: "Diterima" });
 });
 
-// Lihat logs
 app.get('/api/webhook/logs', (req, res) => {
     res.json({ success: true, data: db.logs.slice(0, 50) });
 });
 
-// Reset polling (supaya transaksi lama ke-detect ulang)
 app.post('/api/webhook/reset', (req, res) => {
     db.seenTx = []; saveDb();
     res.json({ success: true, message: "Seen transactions direset" });
 });
 
+// Override pollQris supaya juga kirim ke SSE
+const _origPoll = pollQris;
+// Kita inject SSE notification ke dalam polling langsung:
+// Caranya: wrap ulang pollQris
+async function pollQrisWithSSE() {
+    if (isPolling) return;
+    isPolling = true;
+    try {
+        const result = await hitApi('https://app.orderkuota.com/api/v2/qris/mutasi/1349636', {
+            'requests[0]': 'account', 'requests[qris_history][page]': '1',
+            'requests[qris_history][dari_tanggal]': '', 'requests[qris_history][ke_tanggal]': '', 'requests[qris_history][keterangan]': ''
+        });
+        if (result.success && result.qris_history?.results) {
+            for (const tx of result.qris_history.results) {
+                const txKey = `${tx.id}_${tx.tanggal}_${tx.kredit}`;
+                if (!db.seenTx.includes(txKey)) {
+                    db.seenTx.unshift(txKey);
+                    if (db.seenTx.length > 1000) db.seenTx = db.seenTx.slice(0, 1000);
+                    const amount = cleanNum(tx.kredit);
+                    const isPencairan = String(tx.keterangan || '').toLowerCase().includes('pencairan');
+                    if (amount > 0 && !isPencairan) {
+                        const payload = { id: tx.id, amount, keterangan: tx.keterangan, tanggal: tx.tanggal, status: tx.status };
+                        await broadcastEvent('payment.in', payload);
+                        notifySSE('payment.in', payload);
+                    }
+                    saveDb();
+                }
+            }
+        }
+    } catch(e) { console.log('[Poll] Error:', e.message); }
+    isPolling = false;
+}
+
+// Ganti interval dengan versi yang ada SSE
+setInterval(pollQrisWithSSE, 10000);
+setTimeout(pollQrisWithSSE, 2000);
+
 // Health check
 app.get('/', (req, res) => {
-    res.json({ status: 'ok', service: 'JoJo Store API', version: '2.0', endpoints: ['/api/saldo', '/api/qris?amount=', '/api/mutasi', '/api/order', '/api/withdraw', '/api/topup', '/api/webhook'] });
+    res.json({
+        status: 'ok', service: 'JoJo Store API', version: '2.0',
+        endpoints: ['/api/saldo', '/api/qris?amount=', '/api/mutasi', '/api/order', '/api/withdraw', '/api/webhook', '/api/sse']
+    });
 });
 
 app.listen(PORT, () => console.log(`JoJo Store API v2.0 berjalan di port ${PORT}`));
