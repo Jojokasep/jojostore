@@ -1,13 +1,20 @@
 {
-  "name": "jojostore-api",
+  "name": "jojo-store-api",
   "version": "1.0.0",
-  "main": "server.js",
+  "description": "JoJo Store RESTful API",
+  "main": "index.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node index.js",
+    "dev": "nodemon index.js"
   },
   "dependencies": {
+    "axios": "^1.6.0",
+    "cors": "^2.8.5",
     "express": "^4.18.2",
-    "axios": "^1.7.0",
-    "cors": "^2.8.5"
+    "express-rate-limit": "^7.1.4",
+    "helmet": "^7.1.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
   }
 }
